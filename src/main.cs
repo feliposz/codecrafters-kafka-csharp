@@ -15,6 +15,8 @@ short requestApiVersion = BinaryPrimitives.ReadInt16BigEndian(request.AsSpan()[6
 int correlationId = BinaryPrimitives.ReadInt32BigEndian(request.AsSpan()[8..12]);
 
 int messageSize = 0;
+short errorCode = (short)((requestApiVersion > 4) ? 35 : 0);
 client.Send(BitConverter.GetBytes(messageSize).Reverse().ToArray());
 client.Send(BitConverter.GetBytes(correlationId).Reverse().ToArray());
+client.Send(BitConverter.GetBytes(errorCode).Reverse().ToArray());
 client.Close();
