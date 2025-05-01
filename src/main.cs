@@ -32,7 +32,7 @@ internal class Program
             RequestHeader header = RequestHeader.Parse(request);
 
             Response response;
-            if (header.ApiKey == 18)
+            if (header.ApiKey == (short)ApiKey.APIVersions)
             {
                 if (header.ApiVersion < 0 || header.ApiVersion > 4)
                 {
@@ -117,23 +117,37 @@ internal class ErrorResponse : Response
     }
 }
 
+internal enum ApiKey
+{
+    APIVersions = 18,
+    DescribeTopicPartitions = 75,
+}
+
 internal class ApiKeysResponse : Response
 {
+    internal record ApiVersion(ApiKey Key, short MinVer, short MaxVer);
+
+    static readonly ApiVersion[] versions =
+    {
+        new (ApiKey.APIVersions, 0, 4),
+        new (ApiKey.DescribeTopicPartitions, 0, 0),
+    };
+
     public ApiKeysResponse(RequestHeader header)
     {
         short errorCode = (short)ErrorCode.NONE;
-        byte apiKeysCount = 2;
-        short apiKey = 18;
-        short minVer = 0;
-        short maxVer = 4;
+        byte apiKeysCount = (byte)(versions.Length + 1);
         int throttleTimeMs = 0;
         Write(header.CorrelationId);
         Write(errorCode);
         Write(apiKeysCount);
-        Write(apiKey);
-        Write(minVer);
-        Write(maxVer);
-        Write((byte)0); // reserved for tagged fields
+        foreach (ApiVersion version in versions)
+        {
+            Write((short)version.Key);
+            Write(version.MinVer);
+            Write(version.MaxVer);
+            Write((byte)0); // reserved for tagged fields
+        }
         Write(throttleTimeMs);
         Write((byte)0); // reserved for tagged fields
     }
