@@ -8,40 +8,51 @@ internal class Program
     {
         TcpListener server = new TcpListener(IPAddress.Any, 9092);
         server.Start();
-        Socket client = server.AcceptSocket();
 
-        byte[] requestSizeBuffer = new byte[4];
-        client.Receive(requestSizeBuffer);
-
-        int requestMessageSize = BinaryPrimitives.ReadInt32BigEndian(requestSizeBuffer);
-
-        byte[] request = new byte[requestMessageSize];
-        client.Receive(request);
-
-        RequestHeader header = RequestHeader.Parse(request);
-
-        Response response;
-        if (header.ApiKey == 18)
+        while (true)
         {
-            if (header.ApiVersion < 0 || header.ApiVersion > 4)
+            Socket client = server.AcceptSocket();
+            _ = Task.Run(() => HandleClient(client));
+        }
+    }
+
+    private static void HandleClient(Socket client)
+    {
+        byte[] requestSizeBuffer = new byte[4];
+
+        while (true)
+        {
+            client.Receive(requestSizeBuffer);
+
+            int requestMessageSize = BinaryPrimitives.ReadInt32BigEndian(requestSizeBuffer);
+
+            byte[] request = new byte[requestMessageSize];
+            client.Receive(request);
+
+            RequestHeader header = RequestHeader.Parse(request);
+
+            Response response;
+            if (header.ApiKey == 18)
             {
-                response = new ErrorResponse(header, ErrorCode.UNSUPPORTED_VERSION);
+                if (header.ApiVersion < 0 || header.ApiVersion > 4)
+                {
+                    response = new ErrorResponse(header, ErrorCode.UNSUPPORTED_VERSION);
+                }
+                else
+                {
+                    response = new ApiKeysResponse(header);
+                }
             }
             else
             {
-                response = new ApiKeysResponse(header);
+                response = new ErrorResponse(header, ErrorCode.INVALID_REQUEST);
             }
-        }
-        else
-        {
-            response = new ErrorResponse(header, ErrorCode.INVALID_REQUEST);
-        }
 
-        byte[] responseSize = new byte[4];
-        BinaryPrimitives.WriteInt32BigEndian(responseSize, (int)response.Length);
-        client.Send(responseSize);
-        client.Send(response.ToArray());
-        client.Close();
+            byte[] responseSize = new byte[4];
+            BinaryPrimitives.WriteInt32BigEndian(responseSize, (int)response.Length);
+            client.Send(responseSize);
+            client.Send(response.ToArray());
+        }
     }
 }
 
