@@ -2,55 +2,128 @@ using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 
-TcpListener server = new TcpListener(IPAddress.Any, 9092);
-server.Start();
-Socket client = server.AcceptSocket();
-
-byte[] request = new byte[1024];
-int requestSize = client.Receive(request);
-
-int requestMessageSize = BinaryPrimitives.ReadInt32BigEndian(request.AsSpan()[0..4]);
-short requestApiKey = BinaryPrimitives.ReadInt16BigEndian(request.AsSpan()[4..6]);
-short requestApiVersion = BinaryPrimitives.ReadInt16BigEndian(request.AsSpan()[6..8]);
-int correlationId = BinaryPrimitives.ReadInt32BigEndian(request.AsSpan()[8..12]);
-
-if (requestApiKey == 18)
+internal class Program
 {
-    byte[] buffer = new byte[1024];
-    var response = buffer.AsSpan();
-    int offset = 4; // reserve 32-bits for message size
-
-    BinaryPrimitives.WriteInt32BigEndian(response[offset..], correlationId);
-    offset += 4;
-
-    short errorCode = (short)((requestApiVersion < 0 || requestApiVersion > 4) ? 35 : 0);
-    BinaryPrimitives.WriteInt16BigEndian(response[offset..], errorCode);
-    offset += 2;
-
-    if (errorCode == 0)
+    private static void Main(string[] args)
     {
+        TcpListener server = new TcpListener(IPAddress.Any, 9092);
+        server.Start();
+        Socket client = server.AcceptSocket();
+
+        byte[] requestSizeBuffer = new byte[4];
+        client.Receive(requestSizeBuffer);
+
+        int requestMessageSize = BinaryPrimitives.ReadInt32BigEndian(requestSizeBuffer);
+
+        byte[] request = new byte[requestMessageSize];
+        client.Receive(request);
+
+        RequestHeader header = RequestHeader.Parse(request);
+
+        Response response;
+        if (header.ApiKey == 18)
+        {
+            if (header.ApiVersion < 0 || header.ApiVersion > 4)
+            {
+                response = new ErrorResponse(header, ErrorCode.UNSUPPORTED_VERSION);
+            }
+            else
+            {
+                response = new ApiKeysResponse(header);
+            }
+        }
+        else
+        {
+            response = new ErrorResponse(header, ErrorCode.INVALID_REQUEST);
+        }
+
+        byte[] responseSize = new byte[4];
+        BinaryPrimitives.WriteInt32BigEndian(responseSize, (int)response.Length);
+        client.Send(responseSize);
+        client.Send(response.ToArray());
+        client.Close();
+    }
+}
+
+internal enum ErrorCode
+{
+    NONE = 0,
+    UNSUPPORTED_VERSION = 35,
+    INVALID_REQUEST = 42,
+}
+
+internal class RequestHeader
+{
+    public int MessageSize;
+    public short ApiKey;
+    public short ApiVersion;
+    public int CorrelationId;
+
+    public static RequestHeader Parse(byte[] request)
+    {
+        return new()
+        {
+            MessageSize = request.Length,
+            ApiKey = BinaryPrimitives.ReadInt16BigEndian(request.AsSpan()[0..]),
+            ApiVersion = BinaryPrimitives.ReadInt16BigEndian(request.AsSpan()[2..]),
+            CorrelationId = BinaryPrimitives.ReadInt32BigEndian(request.AsSpan()[4..])
+        };
+    }
+}
+
+internal abstract class Response
+{
+    MemoryStream memoryStream;
+    BinaryWriter writer;
+
+    protected Response()
+    {
+        memoryStream = new MemoryStream();
+        writer = new(memoryStream);
+    }
+
+    public long Length { get => memoryStream.Length; }
+
+    protected void Write(byte x) => writer.Write(x);
+
+    protected void Write(short x) => writer.Write(BinaryPrimitives.ReverseEndianness(x));
+
+    protected void Write(int x) => writer.Write(BinaryPrimitives.ReverseEndianness(x));
+
+    public byte[] ToArray()
+    {
+        memoryStream.Position = 0;
+        return memoryStream.ToArray();
+    }
+}
+
+internal class ErrorResponse : Response
+{
+    public ErrorResponse(RequestHeader header, ErrorCode errorCode)
+    {
+        Write(header.CorrelationId);
+        Write((short)errorCode);
+    }
+}
+
+internal class ApiKeysResponse : Response
+{
+    public ApiKeysResponse(RequestHeader header)
+    {
+        short errorCode = (short)ErrorCode.NONE;
         byte apiKeysCount = 2;
         short apiKey = 18;
         short minVer = 0;
         short maxVer = 4;
         int throttleTimeMs = 0;
-        response[offset++] = apiKeysCount;
-        BinaryPrimitives.WriteInt16BigEndian(response[offset..], apiKey);
-        offset += 2;
-        BinaryPrimitives.WriteInt16BigEndian(response[offset..], minVer);
-        offset += 2;
-        BinaryPrimitives.WriteInt16BigEndian(response[offset..], maxVer);
-        offset += 2;
-        response[offset++] = 0; // reserved for tagged fields
-        BinaryPrimitives.WriteInt32BigEndian(response[offset..], throttleTimeMs);
-        offset += 4;
-        response[offset++] = 0; // reserved for tagged fields
+        Write(header.CorrelationId);
+        Write(errorCode);
+        Write(apiKeysCount);
+        Write(apiKey);
+        Write(minVer);
+        Write(maxVer);
+        Write((byte)0); // reserved for tagged fields
+        Write(throttleTimeMs);
+        Write((byte)0); // reserved for tagged fields
     }
-
-    // the "message size" field itself does not count for the total size on the response
-    int messageSize = offset - 4;
-    BinaryPrimitives.WriteInt32BigEndian(response, messageSize);
-    client.Send(response[0..offset]);
 }
-
-client.Close();
