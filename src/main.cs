@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 
 internal class Program
 {
@@ -28,8 +29,9 @@ internal class Program
 
             byte[] request = new byte[requestMessageSize];
             client.Receive(request);
+            RequestReader reader = new RequestReader(request);
 
-            RequestHeader header = RequestHeader.Parse(request);
+            RequestHeader header = new(reader);
 
             Response response;
             if (header.ApiKey == (short)ApiKey.APIVersions)
@@ -43,6 +45,11 @@ internal class Program
                     response = new ApiKeysResponse(header);
                 }
             }
+            else if (header.ApiKey == (short)ApiKey.DescribeTopicPartitions)
+            {
+                DescribeTopicPartitionsRequest desc = new(header, reader);
+                response = new DescribeTopicPartitionsResponse(header, desc);
+            }
             else
             {
                 response = new ErrorResponse(header, ErrorCode.INVALID_REQUEST);
@@ -50,6 +57,8 @@ internal class Program
 
             byte[] responseSize = new byte[4];
             BinaryPrimitives.WriteInt32BigEndian(responseSize, (int)response.Length);
+            // Console.WriteLine(response.Length);
+            // Console.WriteLine(BitConverter.ToString(response.ToArray()));
             client.Send(responseSize);
             client.Send(response.ToArray());
         }
@@ -59,8 +68,83 @@ internal class Program
 internal enum ErrorCode
 {
     NONE = 0,
+    UNKNOWN_TOPIC_OR_PARTITION = 3,
     UNSUPPORTED_VERSION = 35,
     INVALID_REQUEST = 42,
+}
+
+internal class RequestReader
+{
+    int offset = 0;
+    readonly byte[] buffer;
+
+    public RequestReader(byte[] request)
+    {
+        buffer = request;
+    }
+
+    public long Length { get { return buffer.Length; } }
+
+    public byte ReadByte()
+    {
+        return buffer[offset++];
+    }
+
+    public short ReadInt16()
+    {
+        short x = BinaryPrimitives.ReadInt16BigEndian(buffer.AsSpan()[offset..]);
+        offset += 2;
+        return x;
+    }
+
+    public int ReadInt32()
+    {
+        int x = BinaryPrimitives.ReadInt32BigEndian(buffer.AsSpan()[offset..]);
+        offset += 4;
+        return x;
+    }
+
+    public int ReadVarInt()
+    {
+        int value = 0;
+        bool continuationBit = true;
+        for (int i = 0; i < 5 && continuationBit; i++)
+        {
+            if (offset >= buffer.Length)
+            {
+                throw new IndexOutOfRangeException("End of buffer reading varint.");
+            }
+            continuationBit = (buffer[offset] & 0x80) == 0x80;
+            value = (value << 7) | (buffer[offset++] & 0x7f);
+        }
+        return value;
+    }
+
+    public string? ReadNullableString()
+    {
+        short length = ReadInt16();
+        if (length == -1)
+        {
+            return null;
+        }
+        string s = Encoding.UTF8.GetString(buffer, offset, length);
+        offset += length;
+        return s;
+    }
+
+    internal void ReadTaggedFields()
+    {
+        // TODO: Properly handle tagged fields
+        ReadByte();
+    }
+
+    internal string ReadCompactString()
+    {
+        int length = ReadVarInt() - 1;
+        string s = Encoding.UTF8.GetString(buffer, offset, length);
+        offset += length;
+        return s;
+    }
 }
 
 internal class RequestHeader
@@ -69,16 +153,16 @@ internal class RequestHeader
     public short ApiKey;
     public short ApiVersion;
     public int CorrelationId;
+    public string? ClientId;
 
-    public static RequestHeader Parse(byte[] request)
+    public RequestHeader(RequestReader request)
     {
-        return new()
-        {
-            MessageSize = request.Length,
-            ApiKey = BinaryPrimitives.ReadInt16BigEndian(request.AsSpan()[0..]),
-            ApiVersion = BinaryPrimitives.ReadInt16BigEndian(request.AsSpan()[2..]),
-            CorrelationId = BinaryPrimitives.ReadInt32BigEndian(request.AsSpan()[4..])
-        };
+        MessageSize = (int)request.Length;
+        ApiKey = request.ReadInt16();
+        ApiVersion = request.ReadInt16();
+        CorrelationId = request.ReadInt32();
+        ClientId = request.ReadNullableString();
+        request.ReadTaggedFields();
     }
 }
 
@@ -100,6 +184,19 @@ internal abstract class Response
     protected void Write(short x) => writer.Write(BinaryPrimitives.ReverseEndianness(x));
 
     protected void Write(int x) => writer.Write(BinaryPrimitives.ReverseEndianness(x));
+
+    protected void Write(string str)
+    {
+        // TODO: Implement VARINT
+        byte[] bytes = Encoding.UTF8.GetBytes(str);
+        Write((byte)(bytes.Length + 1));
+        writer.Write(bytes);
+    }
+
+    protected void Write(byte[] bytes)
+    {
+        writer.Write(bytes);
+    }
 
     public byte[] ToArray()
     {
@@ -146,9 +243,64 @@ internal class ApiKeysResponse : Response
             Write((short)version.Key);
             Write(version.MinVer);
             Write(version.MaxVer);
-            Write((byte)0); // reserved for tagged fields
+            Write((byte)0); // empty tagged field array
         }
         Write(throttleTimeMs);
-        Write((byte)0); // reserved for tagged fields
+        Write((byte)0); // empty tagged field array
+    }
+}
+
+internal class DescribeTopicPartitionsRequest
+{
+    public readonly List<string> Topics = new();
+
+    public DescribeTopicPartitionsRequest(RequestHeader header, RequestReader reader)
+    {
+        // Topics Array
+        int topicCount = reader.ReadVarInt() - 1;
+        for (int i = 0; i < topicCount; i++)
+        {
+            Topics.Add(reader.ReadCompactString());
+            reader.ReadTaggedFields();
+        }
+
+        // Response Partition Limit
+        reader.ReadInt32();
+
+        // Cursor
+        reader.ReadByte(); // TODO: handle nullable fields
+
+        // Tag Buffer
+        reader.ReadTaggedFields();
+    }
+}
+
+internal class DescribeTopicPartitionsResponse : Response
+{
+    public DescribeTopicPartitionsResponse(RequestHeader header, DescribeTopicPartitionsRequest desc)
+    {
+        // Response Header
+        Write(header.CorrelationId);
+        Write((byte)0); // empty tagged field array
+
+        // Response Body
+        int throttleTimeMs = 0;
+        Write(throttleTimeMs);
+        byte topicCount = (byte)(1 + 1);
+        Write(topicCount); // TODO: change to VarInt
+        short errorCode = (short)ErrorCode.UNKNOWN_TOPIC_OR_PARTITION;
+        Write(errorCode);
+        // TODO: handle multiple
+        Write(desc.Topics[0]);
+        byte[] topicID = new byte[16];
+        Write(topicID);
+        byte isInternal = 0;
+        Write(isInternal);
+        Write((byte)1); // empty partitions array (compact)
+        int authorizedOperations = 0x00000df8;
+        Write(authorizedOperations);
+        Write((byte)0); // empty tagged field array
+        Write((byte)0xFF); // next cursor (null)
+        Write((byte)0); // empty tagged field array
     }
 }
