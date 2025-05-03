@@ -5,8 +5,19 @@ using System.Text;
 
 internal class Program
 {
+
+    const string metadataPath = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log";
+
     private static void Main(string[] args)
     {
+        if (File.Exists(metadataPath))
+        {
+            byte[] bytes = File.ReadAllBytes(metadataPath);
+            Console.WriteLine($"Read metadata: {bytes.Length} bytes");
+            KafkaProtocolReader reader = new KafkaProtocolReader(bytes);
+            ClusterMetadata metadata = new ClusterMetadata(reader);
+        }
+
         TcpListener server = new TcpListener(IPAddress.Any, 9092);
         server.Start();
 
@@ -29,7 +40,7 @@ internal class Program
 
             byte[] request = new byte[requestMessageSize];
             client.Receive(request);
-            RequestReader reader = new RequestReader(request);
+            KafkaProtocolReader reader = new KafkaProtocolReader(request);
 
             RequestHeader header = new(reader);
 
@@ -65,6 +76,43 @@ internal class Program
     }
 }
 
+internal class ClusterMetadata
+{
+    public ClusterMetadata(KafkaProtocolReader reader)
+    {
+        while (!reader.AtEnd())
+        {
+            long BaseOffset = reader.ReadInt64();
+            int BatchLength = reader.ReadInt32();
+            int PartitionLeaderEpoch = reader.ReadInt32();
+            byte MagicByte = reader.ReadByte();
+            int CRC = reader.ReadInt32();
+            short BatchAttributes = reader.ReadInt16();
+            int LastOffsetDelta = reader.ReadInt32();
+            long BaseTimestamp = reader.ReadInt64();
+            long MaxTimestamp = reader.ReadInt64();
+            long ProducerID = reader.ReadInt64();
+            short ProducerEpoch = reader.ReadInt16();
+            int BaseSequence = reader.ReadInt32();
+            int RecordsLength = reader.ReadInt32();
+            for (int i = 0; i < RecordsLength; i++)
+            {
+                int Length = reader.ReadVarInt();
+                byte RecordAttributes = reader.ReadByte();
+                int TimestampDelta = reader.ReadVarInt();
+                int OffsetDelta = reader.ReadVarInt();
+                int KeyLength = (int)reader.ReadUVarInt() - 1;
+                byte[]? Key = reader.ReadByteArray(KeyLength);
+                int ValueLength = reader.ReadVarInt();
+                byte[]? Value = reader.ReadByteArray(ValueLength);
+                // Console.WriteLine(Value?.Length);
+                // Console.WriteLine(BitConverter.ToString(Value));
+                int HeadersArrayCount = reader.ReadVarInt();
+            }
+        }
+    }
+}
+
 internal enum ErrorCode
 {
     NONE = 0,
@@ -73,12 +121,12 @@ internal enum ErrorCode
     INVALID_REQUEST = 42,
 }
 
-internal class RequestReader
+internal class KafkaProtocolReader
 {
     int offset = 0;
     readonly byte[] buffer;
 
-    public RequestReader(byte[] request)
+    public KafkaProtocolReader(byte[] request)
     {
         buffer = request;
     }
@@ -104,9 +152,17 @@ internal class RequestReader
         return x;
     }
 
+    public long ReadInt64()
+    {
+        long x = BinaryPrimitives.ReadInt64BigEndian(buffer.AsSpan()[offset..]);
+        offset += 8;
+        return x;
+    }
+
     public int ReadVarInt()
     {
         int value = 0;
+        int shift = 0;
         bool continuationBit = true;
         for (int i = 0; i < 5 && continuationBit; i++)
         {
@@ -115,7 +171,27 @@ internal class RequestReader
                 throw new IndexOutOfRangeException("End of buffer reading varint.");
             }
             continuationBit = (buffer[offset] & 0x80) == 0x80;
-            value = (value << 7) | (buffer[offset++] & 0x7f);
+            value |= (buffer[offset++] & 0x7f) << shift;
+            shift += 7;
+        }
+        return (value >> 1) ^ -(value & 1);
+    }
+
+    internal uint ReadUVarInt()
+    {
+        uint value = 0;
+        int shift = 0;
+
+        bool continuationBit = true;
+        for (int i = 0; i < 5 && continuationBit; i++)
+        {
+            if (offset >= buffer.Length)
+            {
+                throw new IndexOutOfRangeException("End of buffer reading varint.");
+            }
+            continuationBit = (buffer[offset] & 0x80) == 0x80;
+            value |= (uint)(buffer[offset++] & 0x7f) << shift;
+            shift += 7;
         }
         return value;
     }
@@ -140,10 +216,26 @@ internal class RequestReader
 
     internal string ReadCompactString()
     {
-        int length = ReadVarInt() - 1;
+        int length = (int)ReadUVarInt() - 1;
         string s = Encoding.UTF8.GetString(buffer, offset, length);
         offset += length;
         return s;
+    }
+
+    internal bool AtEnd()
+    {
+        return offset >= buffer.Length;
+    }
+
+    internal byte[]? ReadByteArray(int keyLength)
+    {
+        if (keyLength == 0)
+        {
+            return null;
+        }
+        byte[] result = buffer[offset..(offset + keyLength)];
+        offset += keyLength;
+        return result;
     }
 }
 
@@ -155,7 +247,7 @@ internal class RequestHeader
     public int CorrelationId;
     public string? ClientId;
 
-    public RequestHeader(RequestReader request)
+    public RequestHeader(KafkaProtocolReader request)
     {
         MessageSize = (int)request.Length;
         ApiKey = request.ReadInt16();
@@ -254,7 +346,7 @@ internal class DescribeTopicPartitionsRequest
 {
     public readonly List<string> Topics = new();
 
-    public DescribeTopicPartitionsRequest(RequestHeader header, RequestReader reader)
+    public DescribeTopicPartitionsRequest(RequestHeader header, KafkaProtocolReader reader)
     {
         // Topics Array
         int topicCount = reader.ReadVarInt() - 1;
