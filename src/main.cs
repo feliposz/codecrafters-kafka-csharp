@@ -62,6 +62,10 @@ internal class Program
                 DescribeTopicPartitionsRequest desc = new(header, reader);
                 response = new DescribeTopicPartitionsResponse(header, desc, metadata);
             }
+            else if (header.ApiKey == (short)ApiKey.Fetch)
+            {
+                response = new FetchResponse(header);
+            }
             else
             {
                 response = new ErrorResponse(header, ErrorCode.INVALID_REQUEST);
@@ -554,6 +558,32 @@ internal class DescribeTopicPartitionsResponse : Response
         }
 
         Write((byte)0xFF); // next cursor (null)
+        Write((byte)0); // empty tagged field array
+    }
+}
+
+
+internal class FetchResponse : Response
+{
+    public FetchResponse(RequestHeader header)
+    {
+        // Response Header
+        Write(header.CorrelationId);
+        Write((byte)0); // empty tagged field array
+
+        // Response Body
+        int throttleTimeMs = 0;
+        Write(throttleTimeMs);
+
+        short errorCode = (short)ErrorCode.NONE;
+        Write(errorCode);
+
+        int sessionId = 0;
+        Write(sessionId);
+
+        // Responses
+        WriteUVarInt(0 + 1);
+
         Write((byte)0); // empty tagged field array
     }
 }
