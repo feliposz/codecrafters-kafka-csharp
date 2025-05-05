@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -65,7 +66,7 @@ internal class Program
             else if (header.ApiKey == (short)ApiKey.Fetch)
             {
                 FetchRequest fetch = new(header, reader);
-                response = new FetchResponse(header, fetch);
+                response = new FetchResponse(header, fetch, metadata);
             }
             else
             {
@@ -607,7 +608,7 @@ internal class FetchRequest
 
 internal class FetchResponse : Response
 {
-    public FetchResponse(RequestHeader header, FetchRequest fetch)
+    public FetchResponse(RequestHeader header, FetchRequest fetch, ClusterMetadata? metadata)
     {
         // Response Header
         Write(header.CorrelationId);
@@ -626,11 +627,15 @@ internal class FetchResponse : Response
         foreach (var topicUUID in fetch.Topics)
         {
             Write(topicUUID);
+            short partitionErrorCode = (short)ErrorCode.UNKNOWN_TOPIC;
+            if (metadata != null && metadata.TopicsByUUID.ContainsKey(BitConverter.ToString(topicUUID)))
+            {
+                partitionErrorCode = (short)ErrorCode.NONE;
+            }
             // partitions
             WriteUVarInt(1 + 1);
             int partitionIndex = 0;
             Write(partitionIndex);
-            short partitionErrorCode = (short)ErrorCode.UNKNOWN_TOPIC;
             Write(partitionErrorCode);
             long highWatermark = 0;
             Write(highWatermark);
