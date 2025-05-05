@@ -6,7 +6,6 @@ using System.Text;
 
 internal class Program
 {
-
     const string metadataPath = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log";
     static ClusterMetadata? metadata;
 
@@ -627,29 +626,63 @@ internal class FetchResponse : Response
         foreach (var topicUUID in fetch.Topics)
         {
             Write(topicUUID);
-            short partitionErrorCode = (short)ErrorCode.UNKNOWN_TOPIC;
-            if (metadata != null && metadata.TopicsByUUID.ContainsKey(BitConverter.ToString(topicUUID)))
+            Topic? topic = null;
+            if (metadata != null && metadata.TopicsByUUID.TryGetValue(BitConverter.ToString(topicUUID), out topic))
             {
-                partitionErrorCode = (short)ErrorCode.NONE;
+                // partitions
+                WriteUVarInt(topic.Partitions.Count + 1);
+                foreach (var partition in topic.Partitions)
+                {
+                    Write(partition.PartitionIndex);
+                    short partitionErrorCode = (short)ErrorCode.NONE;
+                    Write(partitionErrorCode);
+                    long highWatermark = 0;
+                    Write(highWatermark);
+                    long lastStableOffset = 0;
+                    Write(lastStableOffset);
+                    long logStartOffset = 0;
+                    Write(logStartOffset);
+                    // abortedTransactions 
+                    WriteUVarInt(0 + 1);
+                    int preferredReadReplica = 0;
+                    Write(preferredReadReplica);
+                    // records 
+                    string partitionLogPath = "/tmp/kraft-combined-logs/" + topic.Name + "-" + partition.PartitionIndex + "/00000000000000000000.log";
+                    if (File.Exists(partitionLogPath))
+                    {
+                        byte[] record = File.ReadAllBytes(partitionLogPath);
+                        WriteUVarInt(record.Length);
+                        Write(record);
+                    }
+                    else
+                    {
+                        WriteUVarInt(0 + 1);
+                    }
+                    Write((byte)0); // empty tagged field array (partitions)
+                }
             }
-            // partitions
-            WriteUVarInt(1 + 1);
-            int partitionIndex = 0;
-            Write(partitionIndex);
-            Write(partitionErrorCode);
-            long highWatermark = 0;
-            Write(highWatermark);
-            long lastStableOffset = 0;
-            Write(lastStableOffset);
-            long logStartOffset = 0;
-            Write(logStartOffset);
-            // abortedTransactions 
-            WriteUVarInt(0 + 1);
-            int preferredReadReplica = 0;
-            Write(preferredReadReplica);
-            // records 
-            WriteUVarInt(0 + 1);
-            Write((byte)0); // empty tagged field array (partitions)
+            else
+            {
+                // partitions
+                WriteUVarInt(1 + 1);
+                int partitionIndex = 0;
+                Write(partitionIndex);
+                short partitionErrorCode = (short)ErrorCode.UNKNOWN_TOPIC;
+                Write(partitionErrorCode);
+                long highWatermark = 0;
+                Write(highWatermark);
+                long lastStableOffset = 0;
+                Write(lastStableOffset);
+                long logStartOffset = 0;
+                Write(logStartOffset);
+                // abortedTransactions 
+                WriteUVarInt(0 + 1);
+                int preferredReadReplica = 0;
+                Write(preferredReadReplica);
+                // records 
+                WriteUVarInt(0 + 1);
+                Write((byte)0); // empty tagged field array (partitions)
+            }
             Write((byte)0); // empty tagged field array (responses)
         }
         Write((byte)0); // empty tagged field array (body)
