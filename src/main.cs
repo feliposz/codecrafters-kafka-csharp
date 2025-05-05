@@ -64,7 +64,8 @@ internal class Program
             }
             else if (header.ApiKey == (short)ApiKey.Fetch)
             {
-                response = new FetchResponse(header);
+                FetchRequest fetch = new(header, reader);
+                response = new FetchResponse(header, fetch);
             }
             else
             {
@@ -223,6 +224,7 @@ internal enum ErrorCode
     UNKNOWN_TOPIC_OR_PARTITION = 3,
     UNSUPPORTED_VERSION = 35,
     INVALID_REQUEST = 42,
+    UNKNOWN_TOPIC = 100,
 }
 
 internal class KafkaProtocolReader
@@ -376,10 +378,9 @@ internal abstract class Response
     public long Length { get => memoryStream.Length; }
 
     protected void Write(byte x) => writer.Write(x);
-
     protected void Write(short x) => writer.Write(BinaryPrimitives.ReverseEndianness(x));
-
     protected void Write(int x) => writer.Write(BinaryPrimitives.ReverseEndianness(x));
+    protected void Write(long x) => writer.Write(BinaryPrimitives.ReverseEndianness(x));
 
     protected void Write(string str)
     {
@@ -562,10 +563,51 @@ internal class DescribeTopicPartitionsResponse : Response
     }
 }
 
+internal class FetchRequest
+{
+    public List<byte[]> Topics = new();
+
+    public FetchRequest(RequestHeader header, KafkaProtocolReader reader)
+    {
+        var maxWaitMs = reader.ReadInt32();
+        var minBytes = reader.ReadInt32();
+        var maxBytes = reader.ReadInt32();
+        var isolationLevel = reader.ReadByte();
+        var sessionId = reader.ReadInt32();
+        var sessionEpoch = reader.ReadInt32();
+        var topicCount = reader.ReadUVarInt() - 1;
+        for (int i = 0; i < topicCount; i++)
+        {
+            var topicUUID = reader.ReadByteArray(16)!;
+            Topics.Add(topicUUID);
+            var partitionCount = reader.ReadUVarInt() - 1;
+            for (int j = 0; j < topicCount; j++)
+            {
+                var partition = reader.ReadInt32();
+                var currentLeaderEpoch = reader.ReadInt32();
+                var fetchOffset = reader.ReadInt64();
+                var lastFetchedEpoch = reader.ReadInt32();
+                var logStartOffset = reader.ReadInt64();
+                var partitionMaxBytes = reader.ReadInt32();
+                reader.ReadTaggedFields();
+            }
+            reader.ReadTaggedFields();
+        }
+        var forgottenTopicCount = reader.ReadUVarInt() - 1;
+        for (int i = 0; i < forgottenTopicCount; i++)
+        {
+            var uuid = reader.ReadByteArray(16);
+            var partitions = reader.ReadInt32();
+            reader.ReadTaggedFields();
+        }
+        var rackId = reader.ReadCompactString();
+        reader.ReadTaggedFields();
+    }
+}
 
 internal class FetchResponse : Response
 {
-    public FetchResponse(RequestHeader header)
+    public FetchResponse(RequestHeader header, FetchRequest fetch)
     {
         // Response Header
         Write(header.CorrelationId);
@@ -574,16 +616,39 @@ internal class FetchResponse : Response
         // Response Body
         int throttleTimeMs = 0;
         Write(throttleTimeMs);
-
         short errorCode = (short)ErrorCode.NONE;
         Write(errorCode);
-
         int sessionId = 0;
         Write(sessionId);
 
         // Responses
-        WriteUVarInt(0 + 1);
-
-        Write((byte)0); // empty tagged field array
+        WriteUVarInt(fetch.Topics.Count + 1);
+        foreach (var topicUUID in fetch.Topics)
+        {
+            Write(topicUUID);
+            // partitions
+            WriteUVarInt(1 + 1);
+            int partitionIndex = 0;
+            Write(partitionIndex);
+            short partitionErrorCode = (short)ErrorCode.UNKNOWN_TOPIC;
+            Write(partitionErrorCode);
+            long highWatermark = 0;
+            Write(highWatermark);
+            long lastStableOffset = 0;
+            Write(lastStableOffset);
+            long logStartOffset = 0;
+            Write(logStartOffset);
+            // abortedTransactions 
+            WriteUVarInt(0 + 1);
+            int preferredReadReplica = 0;
+            Write(preferredReadReplica);
+            // records 
+            WriteUVarInt(0 + 1);
+            Write((byte)0); // empty tagged field array (partitions)
+            Write((byte)0); // empty tagged field array (responses)
+        }
+        Write((byte)0); // empty tagged field array (body)
     }
+
+
 }
