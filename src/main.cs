@@ -486,9 +486,8 @@ internal class DescribeTopicPartitionsResponse : Response
         // Response Body
         int throttleTimeMs = 0;
         Write(throttleTimeMs);
-        byte topicCount = (byte)(1 + 1);
-        WriteUVarInt(topicCount);
 
+        WriteUVarInt(desc.Topics.Count + 1);
         foreach (string topicName in desc.Topics)
         {
             short errorCode = (short)ErrorCode.UNKNOWN_TOPIC_OR_PARTITION;
@@ -501,7 +500,7 @@ internal class DescribeTopicPartitionsResponse : Response
                 topicID = topic.UUID!;
             }
             Write(errorCode);
-            Write(desc.Topics[0]);
+            Write(topicName);
             Write(topicID);
             Write(isInternal);
             if (topic != null && topic.Partitions.Count > 0)
