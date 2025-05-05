@@ -565,7 +565,13 @@ internal class DescribeTopicPartitionsResponse : Response
 
 internal class FetchRequest
 {
-    public List<byte[]> Topics = new();
+    public record Item
+    {
+        public required byte[] Topic;
+        public List<int> Partitions = new();
+    }
+
+    public List<Item> Items = new();
 
     public FetchRequest(RequestHeader header, KafkaProtocolReader reader)
     {
@@ -579,11 +585,13 @@ internal class FetchRequest
         for (int i = 0; i < topicCount; i++)
         {
             var topicUUID = reader.ReadByteArray(16)!;
-            Topics.Add(topicUUID);
+            var item = new Item() { Topic = topicUUID };
+            Items.Add(item);
             var partitionCount = reader.ReadUVarInt() - 1;
             for (int j = 0; j < topicCount; j++)
             {
                 var partition = reader.ReadInt32();
+                item.Partitions.Add(partition);
                 var currentLeaderEpoch = reader.ReadInt32();
                 var fetchOffset = reader.ReadInt64();
                 var lastFetchedEpoch = reader.ReadInt32();
@@ -622,71 +630,67 @@ internal class FetchResponse : Response
         Write(sessionId);
 
         // Responses
-        WriteUVarInt(fetch.Topics.Count + 1);
-        foreach (var topicUUID in fetch.Topics)
+        WriteUVarInt(fetch.Items.Count + 1);
+        foreach (var item in fetch.Items)
         {
-            Write(topicUUID);
+            Write(item.Topic);
             Topic? topic = null;
-            if (metadata != null && metadata.TopicsByUUID.TryGetValue(BitConverter.ToString(topicUUID), out topic))
+            if (metadata != null && metadata.TopicsByUUID.TryGetValue(BitConverter.ToString(item.Topic), out topic))
             {
                 // partitions
-                WriteUVarInt(topic.Partitions.Count + 1);
-                foreach (var partition in topic.Partitions)
+                WriteUVarInt(item.Partitions.Count + 1);
+                foreach (var partitionIndex in item.Partitions)
                 {
-                    Write(partition.PartitionIndex);
-                    short partitionErrorCode = (short)ErrorCode.NONE;
-                    Write(partitionErrorCode);
-                    long highWatermark = 0;
-                    Write(highWatermark);
-                    long lastStableOffset = 0;
-                    Write(lastStableOffset);
-                    long logStartOffset = 0;
-                    Write(logStartOffset);
-                    // abortedTransactions 
-                    WriteUVarInt(0 + 1);
-                    int preferredReadReplica = 0;
-                    Write(preferredReadReplica);
-                    // records 
-                    string partitionLogPath = "/tmp/kraft-combined-logs/" + topic.Name + "-" + partition.PartitionIndex + "/00000000000000000000.log";
-                    if (File.Exists(partitionLogPath))
+                    var partition = topic.Partitions.Where(p => p.PartitionIndex == partitionIndex).First();
+                    if (partition != null)
                     {
-                        byte[] record = File.ReadAllBytes(partitionLogPath);
-                        WriteUVarInt(record.Length);
-                        Write(record);
+                        string partitionLogPath = "/tmp/kraft-combined-logs/" + topic.Name + "-" + partitionIndex + "/00000000000000000000.log";
+                        byte[]? record = null;
+                        if (File.Exists(partitionLogPath))
+                        {
+                            record = File.ReadAllBytes(partitionLogPath);
+                        }
+                        WriteTopicPartition(partition.PartitionIndex, ErrorCode.NONE, record);
                     }
                     else
                     {
-                        WriteUVarInt(0 + 1);
+                        WriteTopicPartition(partitionIndex, ErrorCode.UNKNOWN_TOPIC_OR_PARTITION, null);
                     }
-                    Write((byte)0); // empty tagged field array (partitions)
                 }
             }
             else
             {
-                // partitions
                 WriteUVarInt(1 + 1);
-                int partitionIndex = 0;
-                Write(partitionIndex);
-                short partitionErrorCode = (short)ErrorCode.UNKNOWN_TOPIC;
-                Write(partitionErrorCode);
-                long highWatermark = 0;
-                Write(highWatermark);
-                long lastStableOffset = 0;
-                Write(lastStableOffset);
-                long logStartOffset = 0;
-                Write(logStartOffset);
-                // abortedTransactions 
-                WriteUVarInt(0 + 1);
-                int preferredReadReplica = 0;
-                Write(preferredReadReplica);
-                // records 
-                WriteUVarInt(0 + 1);
-                Write((byte)0); // empty tagged field array (partitions)
+                WriteTopicPartition(0, ErrorCode.UNKNOWN_TOPIC, null);
             }
             Write((byte)0); // empty tagged field array (responses)
         }
         Write((byte)0); // empty tagged field array (body)
     }
 
-
+    private void WriteTopicPartition(int partitionIndex, ErrorCode errorCode, byte[]? record)
+    {
+        Write(partitionIndex);
+        Write((short)errorCode);
+        long highWatermark = 0;
+        Write(highWatermark);
+        long lastStableOffset = 0;
+        Write(lastStableOffset);
+        long logStartOffset = 0;
+        Write(logStartOffset);
+        int abortedTransactions = 0;
+        WriteUVarInt(abortedTransactions + 1);
+        int preferredReadReplica = 0;
+        Write(preferredReadReplica);
+        if (record == null)
+        {
+            WriteUVarInt(0 + 1);
+        }
+        else
+        {
+            WriteUVarInt(record.Length + 1);
+            Write(record);
+        }
+        Write((byte)0); // empty tagged field array (partitions)
+    }
 }
