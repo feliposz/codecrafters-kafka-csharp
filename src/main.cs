@@ -7,6 +7,7 @@ internal class Program
 {
 
     const string metadataPath = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log";
+    static ClusterMetadata? metadata;
 
     private static void Main(string[] args)
     {
@@ -15,7 +16,7 @@ internal class Program
             byte[] bytes = File.ReadAllBytes(metadataPath);
             Console.WriteLine($"Read metadata: {bytes.Length} bytes");
             KafkaProtocolReader reader = new KafkaProtocolReader(bytes);
-            ClusterMetadata metadata = new ClusterMetadata(reader);
+            metadata = new ClusterMetadata(reader);
         }
 
         TcpListener server = new TcpListener(IPAddress.Any, 9092);
@@ -59,7 +60,7 @@ internal class Program
             else if (header.ApiKey == (short)ApiKey.DescribeTopicPartitions)
             {
                 DescribeTopicPartitionsRequest desc = new(header, reader);
-                response = new DescribeTopicPartitionsResponse(header, desc);
+                response = new DescribeTopicPartitionsResponse(header, desc, metadata);
             }
             else
             {
@@ -76,8 +77,33 @@ internal class Program
     }
 }
 
+internal class Topic(byte[] uuid, string name)
+{
+    public byte[] UUID = uuid;
+    public string Name = name;
+    public List<Partition> Partitions = new();
+}
+
+internal class Partition
+{
+    public int PartitionIndex;
+    public int LeaderID;
+    public int LeaderEpoch;
+    public int PartitionEpoch;
+    public List<int> ReplicaNodes = new();
+    public List<int> InSyncReplicaNodes = new();
+    public List<int> EligibleLeaderReplicas = new();
+    public List<int> LastKnownELR = new();
+    public List<int> OfflineReplicas = new();
+    public List<int> AddingReplicas = new();
+    public List<int> RemovingReplicas = new();
+}
+
 internal class ClusterMetadata
 {
+    public readonly Dictionary<string, Topic> TopicsByUUID = new();
+    public readonly Dictionary<string, Topic> TopicsByName = new();
+
     public ClusterMetadata(KafkaProtocolReader reader)
     {
         while (!reader.AtEnd())
@@ -104,9 +130,83 @@ internal class ClusterMetadata
                 int KeyLength = (int)reader.ReadUVarInt() - 1;
                 byte[]? Key = reader.ReadByteArray(KeyLength);
                 int ValueLength = reader.ReadVarInt();
-                byte[]? Value = reader.ReadByteArray(ValueLength);
+                // byte[]? Value = reader.ReadByteArray(ValueLength);
                 // Console.WriteLine(Value?.Length);
                 // Console.WriteLine(BitConverter.ToString(Value));
+
+                var FrameVersion = reader.ReadByte();
+                var Type = reader.ReadByte();
+
+                if (Type == 12) // Feature Level Record
+                {
+                    var Version = reader.ReadByte();
+                    var Name = reader.ReadCompactString();
+                    // Console.WriteLine("Feature Level Record - Name: " + Name);
+                    var FeatureLevel = reader.ReadInt16();
+                    reader.ReadTaggedFields();
+                }
+                else if (Type == 2) // Topic Record
+                {
+                    var Version = reader.ReadByte();
+                    var TopicName = reader.ReadCompactString();
+                    // Console.WriteLine("Topic Record - TopicName: " + TopicName);
+                    byte[]? TopicUUID = reader.ReadByteArray(16)!;
+                    string strUUID = BitConverter.ToString(TopicUUID);
+                    // Console.WriteLine("Topic Record - TopicUUID: " + strUUID);
+                    reader.ReadTaggedFields();
+                    if (TopicUUID != null)
+                    {
+                        Topic topic = new(TopicUUID, TopicName);
+                        TopicsByUUID[strUUID] = topic;
+                        TopicsByName[TopicName] = topic;
+                    }
+                }
+                else if (Type == 3) // Partition Record
+                {
+                    var Version = reader.ReadByte();
+                    Partition partition = new();
+                    partition.PartitionIndex = reader.ReadInt32();
+                    // Console.WriteLine("Partition Record - ID " + partition.PartitionIndex);
+                    string TopicUUID = BitConverter.ToString(reader.ReadByteArray(16)!);
+                    // Console.WriteLine("Partition Record - TopicUUID: " + TopicUUID);
+                    if (TopicUUID != null && TopicsByUUID.TryGetValue(TopicUUID, out Topic? topic))
+                    {
+                        topic.Partitions.Add(partition);
+                    }
+                    var LengthOfReplicaArray = reader.ReadUVarInt() - 1;
+                    for (int j = 0; j < LengthOfReplicaArray; j++)
+                    {
+                        partition.ReplicaNodes.Add(reader.ReadInt32());
+                    }
+                    var LengthOfInSyncReplicaArray = reader.ReadUVarInt() - 1;
+                    for (int j = 0; j < LengthOfInSyncReplicaArray; j++)
+                    {
+                        partition.InSyncReplicaNodes.Add(reader.ReadInt32());
+                    }
+                    var LengthOfRemovingReplicasArray = reader.ReadUVarInt() - 1;
+                    for (int j = 0; j < LengthOfRemovingReplicasArray; j++)
+                    {
+                        partition.RemovingReplicas.Add(reader.ReadInt32());
+                    }
+                    var LengthOfAddingReplicasID = reader.ReadUVarInt() - 1;
+                    for (int j = 0; j < LengthOfAddingReplicasID; j++)
+                    {
+                        partition.AddingReplicas.Add(reader.ReadInt32());
+                    }
+                    partition.LeaderID = reader.ReadInt32();
+                    partition.LeaderEpoch = reader.ReadInt32();
+                    partition.PartitionEpoch = reader.ReadInt32();
+                    var LengthOfDirectoriesArray = reader.ReadUVarInt() - 1;
+                    for (int j = 0; j < LengthOfDirectoriesArray; j++)
+                    {
+                        byte[]? DirectoryUUID = reader.ReadByteArray(16);
+                    }
+                    reader.ReadTaggedFields();
+                }
+                else
+                {
+                    throw new NotImplementedException("Type: " + Type);
+                }
                 int HeadersArrayCount = reader.ReadVarInt();
             }
         }
@@ -279,15 +379,24 @@ internal abstract class Response
 
     protected void Write(string str)
     {
-        // TODO: Implement VARINT
         byte[] bytes = Encoding.UTF8.GetBytes(str);
-        Write((byte)(bytes.Length + 1));
+        WriteUVarInt(bytes.Length + 1);
         writer.Write(bytes);
     }
 
     protected void Write(byte[] bytes)
     {
         writer.Write(bytes);
+    }
+
+    protected void WriteUVarInt(int x)
+    {
+        while (x >= 0x80)
+        {
+            Write((byte)((x & 0x7F) | 0x80));
+            x >>= 7;
+        }
+        Write((byte)x);
     }
 
     public byte[] ToArray()
@@ -349,15 +458,14 @@ internal class DescribeTopicPartitionsRequest
     public DescribeTopicPartitionsRequest(RequestHeader header, KafkaProtocolReader reader)
     {
         // Topics Array
-        int topicCount = reader.ReadVarInt() - 1;
+        int topicCount = (int)reader.ReadUVarInt() - 1;
         for (int i = 0; i < topicCount; i++)
         {
             Topics.Add(reader.ReadCompactString());
             reader.ReadTaggedFields();
         }
 
-        // Response Partition Limit
-        reader.ReadInt32();
+        var ResponsePartitionLimit = reader.ReadInt32();
 
         // Cursor
         reader.ReadByte(); // TODO: handle nullable fields
@@ -369,7 +477,7 @@ internal class DescribeTopicPartitionsRequest
 
 internal class DescribeTopicPartitionsResponse : Response
 {
-    public DescribeTopicPartitionsResponse(RequestHeader header, DescribeTopicPartitionsRequest desc)
+    public DescribeTopicPartitionsResponse(RequestHeader header, DescribeTopicPartitionsRequest desc, ClusterMetadata? metadata)
     {
         // Response Header
         Write(header.CorrelationId);
@@ -379,19 +487,71 @@ internal class DescribeTopicPartitionsResponse : Response
         int throttleTimeMs = 0;
         Write(throttleTimeMs);
         byte topicCount = (byte)(1 + 1);
-        Write(topicCount); // TODO: change to VarInt
-        short errorCode = (short)ErrorCode.UNKNOWN_TOPIC_OR_PARTITION;
-        Write(errorCode);
-        // TODO: handle multiple
-        Write(desc.Topics[0]);
-        byte[] topicID = new byte[16];
-        Write(topicID);
-        byte isInternal = 0;
-        Write(isInternal);
-        Write((byte)1); // empty partitions array (compact)
-        int authorizedOperations = 0x00000df8;
-        Write(authorizedOperations);
-        Write((byte)0); // empty tagged field array
+        WriteUVarInt(topicCount);
+
+        foreach (string topicName in desc.Topics)
+        {
+            short errorCode = (short)ErrorCode.UNKNOWN_TOPIC_OR_PARTITION;
+            byte[] topicID = new byte[16];
+            byte isInternal = 0;
+            Topic? topic = null;
+            if (metadata != null && metadata.TopicsByName.TryGetValue(topicName, out topic) && topic != null)
+            {
+                errorCode = (short)ErrorCode.NONE;
+                topicID = topic.UUID!;
+            }
+            Write(errorCode);
+            Write(desc.Topics[0]);
+            Write(topicID);
+            Write(isInternal);
+            if (topic != null && topic.Partitions.Count > 0)
+            {
+                WriteUVarInt(topic.Partitions.Count + 1);
+                foreach (Partition p in topic.Partitions)
+                {
+                    short partitionErrorCode = (short)ErrorCode.NONE;
+                    Write(partitionErrorCode);
+                    Write(p.PartitionIndex);
+                    Write(p.LeaderID);
+                    Write(p.LeaderEpoch);
+                    WriteUVarInt(p.ReplicaNodes.Count + 1);
+                    foreach (int n in p.ReplicaNodes)
+                    {
+                        Write(n);
+                    }
+                    WriteUVarInt(p.InSyncReplicaNodes.Count + 1);
+                    foreach (int n in p.InSyncReplicaNodes)
+                    {
+                        Write(n);
+                    }
+                    WriteUVarInt(p.EligibleLeaderReplicas.Count + 1);
+                    foreach (int n in p.EligibleLeaderReplicas)
+                    {
+                        Write(n);
+                    }
+                    WriteUVarInt(p.LastKnownELR.Count + 1);
+                    foreach (int n in p.LastKnownELR)
+                    {
+                        Write(n);
+                    }
+                    WriteUVarInt(p.OfflineReplicas.Count + 1);
+                    foreach (int n in p.OfflineReplicas)
+                    {
+                        Write(n);
+                    }
+                    Write((byte)0); // empty tagged field array
+                }
+            }
+            else
+            {
+                Write((byte)1); // empty partitions array (compact)
+            }
+
+            int authorizedOperations = 0x00000df8;
+            Write(authorizedOperations);
+            Write((byte)0); // empty tagged field array
+        }
+
         Write((byte)0xFF); // next cursor (null)
         Write((byte)0); // empty tagged field array
     }
