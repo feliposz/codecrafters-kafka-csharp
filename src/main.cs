@@ -417,6 +417,7 @@ internal class ErrorResponse : Response
 
 internal enum ApiKey
 {
+    Fetch = 1,
     APIVersions = 18,
     DescribeTopicPartitions = 75,
 }
@@ -427,6 +428,7 @@ internal class ApiKeysResponse : Response
 
     static readonly ApiVersion[] versions =
     {
+        new (ApiKey.Fetch, 0, 16),
         new (ApiKey.APIVersions, 0, 4),
         new (ApiKey.DescribeTopicPartitions, 0, 0),
     };
